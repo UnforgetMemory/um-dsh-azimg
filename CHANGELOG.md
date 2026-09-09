@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-08
+
+### Added
+
+- 静态 bundle 移植：`dsh.bundle` + `dsh.client` 声明、单行双面 `cordis.patch.yml` 层；Host 半 `lib/index.js`（裸 ToolDefinition 注册 `um_analyze_img` + `umimg/*` Typert Remote 设置服务），Client 半 `lib/client.js`（手写 factory-form 浏览器 bundle，零构建）；`dsh plugin add github:UnforgetMemory/um-dsh-azimg` 安装即随 profile 层常驻激活，消除 "declares no dsh.bundle" 警告
+
 ## [0.1.1] - 2026-09-08
 
 ### Changed
