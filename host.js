@@ -1,6 +1,14 @@
 // um-dsh-azimg · Host 半（cordis_define 的 code.host 函数体）
 // 工具 um_analyze_img：多图 + 格式嗅探 + 限额预检 + 候选失败切换 + 结构化呈现元数据
 // 设置面板数据面：模型能力识别（image/text/unknown）+ 热切换选择 + 可用性探测
+//
+// 分层（cordis_define 单函数体约束下的区内分层，依赖方向自上而下、禁止反向）：
+//   L1 libraries —— 纯函数：格式嗅探 / 参数规范化 / 统计与候选过滤 / 并发工具（无 ctx 依赖）
+//   L2 provider  —— 平台能力封装：ctx.llm / ctx.fs / ctx.attachments 的唯一出口
+//   L3 scenario  —— 多步编排：读取预检 → 原子入库 → 候选解析 → 失败切换 → 结果组装
+//   L4 app       —— 装配：工具定义（execute 线性编排）+ RPC + Fiber 副作用回收
+
+// ════════════════════════ L1 libraries（纯函数，无 ctx 依赖）════════════════════════
 
 const MAX_IMAGES = 8
 const MODEL_CACHE_TTL_MS = 30000
@@ -13,12 +21,6 @@ const EXT_MEDIA = {
   jpeg: 'image/jpeg',
   webp: 'image/webp',
   gif: 'image/gif',
-}
-const MEDIA_LABEL = {
-  'image/png': 'PNG',
-  'image/jpeg': 'JPEG',
-  'image/webp': 'WebP',
-  'image/gif': 'GIF',
 }
 
 function clip(value, max) {
@@ -105,15 +107,63 @@ function buildPrompt(question, described) {
   ].filter(Boolean).join('\n\n')
 }
 
+// 入参规范化：image_paths 去空 → 非空校验 → 张数上限校验
+function normalizePaths(args, limits) {
+  const paths = toStringList(args && args.image_paths)
+  if (paths.length === 0) {
+    throw new Error('um_analyze_img: image_paths 至少需要一个图片路径。')
+  }
+  const maxCount = Math.min(MAX_IMAGES, limits.maxImagesPerMessage || MAX_IMAGES)
+  if (paths.length > maxCount) {
+    throw new Error('um_analyze_img: 一次最多 ' + maxCount + ' 张图片，收到 ' + paths.length + ' 张。')
+  }
+  return paths
+}
+
+// 能力统计：providers/models/image/textOnly/unknown/resolved
+function recount(groups) {
+  const stats = { providers: 0, models: 0, image: 0, textOnly: 0, unknown: 0, resolved: 0 }
+  for (const group of groups) {
+    if (group.error) continue
+    stats.providers++
+    for (const row of group.models) {
+      stats.models++
+      if (row.support === 'image') stats.image++
+      else if (row.support === 'text') stats.textOnly++
+      else stats.unknown++
+      if (row.resolved) stats.resolved++
+    }
+  }
+  return stats
+}
+
+// 从能力快照中过滤出支持图片的候选模型（保持枚举顺序）
+function imageCandidates(snapshot) {
+  const out = []
+  for (const group of snapshot.groups) {
+    for (const row of group.models) {
+      if (row.support !== 'image') continue
+      out.push({
+        provider: group.provider,
+        providerName: group.providerName,
+        model: row.model,
+        name: row.name,
+        description: row.description,
+      })
+    }
+  }
+  return out
+}
+
 return {
   inject: ['tools', 'subagents', 'llm', 'agents', 'attachments', 'fs'],
   apply(ctx) {
-    // ── 热切换状态：当前选定的 vision provider/model（null = 自动依次尝试） ──
-    let selection = null
-    // ── 最近一次工具调用摘要（面板回显用） ──
-    let lastRun = null
-    // ── 模型能力枚举缓存 ──
-    let modelCache = null
+    // ══ store：会话内存态（动态插件按规范不持久化，进程重启即重置）══
+    let selection = null   // 热切换：当前选定的 vision provider/model（null = 自动依次尝试）
+    let lastRun = null     // 最近一次工具调用摘要（面板回显用）
+    let modelCache = null  // 模型能力枚举缓存（TTL = MODEL_CACHE_TTL_MS）
+
+    // ════════════════════════ L2 provider（平台能力唯一出口）════════════════════════
 
     function limitsSnapshot() {
       const limits = ctx.attachments.imageLimits
@@ -125,22 +175,6 @@ return {
         maxImageDimension: limits.maxImageDimension,
         mediaTypes: limits.mediaTypes.slice(),
       }
-    }
-
-    function recount(groups) {
-      const stats = { providers: 0, models: 0, image: 0, textOnly: 0, unknown: 0, resolved: 0 }
-      for (const group of groups) {
-        if (group.error) continue
-        stats.providers++
-        for (const row of group.models) {
-          stats.models++
-          if (row.support === 'image') stats.image++
-          else if (row.support === 'text') stats.textOnly++
-          else stats.unknown++
-          if (row.resolved) stats.resolved++
-        }
-      }
-      return stats
     }
 
     // 逐个 provider 枚举模型，按 inputModalities 三分；unknown 再用 resolveModelInfo 复核
@@ -204,23 +238,6 @@ return {
       return modelCache
     }
 
-    function imageCandidates(snapshot) {
-      const out = []
-      for (const group of snapshot.groups) {
-        for (const row of group.models) {
-          if (row.support !== 'image') continue
-          out.push({
-            provider: group.provider,
-            providerName: group.providerName,
-            model: row.model,
-            name: row.name,
-            description: row.description,
-          })
-        }
-      }
-      return out
-    }
-
     async function probeModel(provider, model) {
       if (!provider || !model) return { ok: false, detail: '缺少 provider 或 model。' }
       try {
@@ -244,7 +261,98 @@ return {
       }
     }
 
-    // 分析一次：返回 { ok, text, detail }
+    // 读单张图片：定位 → 读字节（带上限截断）→ 魔数嗅探 → 单图校验
+    async function readImageInput(path, limits, exec) {
+      let target
+      try {
+        target = await ctx.fs.resolve(path, { signal: exec.signal })
+      } catch (err) {
+        throw new Error('um_analyze_img: 无法定位图片「' + path + '」：' + clip(err && err.message, 160))
+      }
+      const readCap = Math.max(1024, Math.min(limits.maxImageBytes, 32 * 1024 * 1024))
+      let bytes
+      try {
+        bytes = await ctx.fs.readBytes(target, exec.signal, readCap)
+      } catch (err) {
+        throw new Error('um_analyze_img: 读取图片「' + path + '」失败：' + clip(err && err.message, 160))
+      }
+      if (bytes.length >= readCap) {
+        throw new Error(
+          'um_analyze_img: 图片「' + path + '」超过单图上限 ' + limits.maxImageBytes + ' 字节。',
+        )
+      }
+      const mediaType = resolveMediaType(path, bytes)
+      if (!mediaType) {
+        throw new Error(
+          'um_analyze_img: 无法识别「' + path + '」的图片格式（仅支持 ' + limits.mediaTypes.join(' / ') + '）。',
+        )
+      }
+      return { data: bytes, mediaType: mediaType, name: baseNameOf(path) }
+    }
+
+    // ════════════════════════ L3 scenario（多步编排）════════════════════════
+
+    // 阶段 1：逐张读取 + 预检 → 累计总量校验
+    async function collectImageInputs(paths, limits, exec) {
+      const inputs = []
+      const described = []
+      let totalBytes = 0
+      for (const path of paths) {
+        const input = await readImageInput(path, limits, exec)
+        totalBytes += input.data.length
+        inputs.push(input)
+        described.push({ path: path, name: input.name, mediaType: input.mediaType, bytes: input.data.length })
+      }
+      if (limits.maxMessageImageBytes && totalBytes > limits.maxMessageImageBytes) {
+        throw new Error(
+          'um_analyze_img: 图片总量 ' + totalBytes + ' 字节超过单条消息上限 ' + limits.maxMessageImageBytes + ' 字节。',
+        )
+      }
+      return { inputs: inputs, described: described }
+    }
+
+    // 阶段 2：批量原子入库，并把校验后的真实尺寸/字节回写到描述表
+    async function storeAndMerge(inputs, described) {
+      const refs = await ctx.attachments.saveImages(inputs)
+      for (let i = 0; i < described.length; i++) {
+        const ref = refs[i]
+        if (!ref) continue
+        described[i].width = ref.width
+        described[i].height = ref.height
+        described[i].bytes = ref.bytes
+        described[i].mediaType = ref.mediaType
+      }
+      return refs
+    }
+
+    // 阶段 3：组装 prompt（文本 + N 个 image 块，顺序与入库一致）
+    function composePrompt(question, described, refs) {
+      const prompt = [{ type: 'text', text: buildPrompt(question, described) }]
+      for (const ref of refs) prompt.push({ type: 'image', attachment: ref })
+      return prompt
+    }
+
+    // 阶段 4：候选解析 —— 面板有选择 = 只试它（不静默切换）；无选择 = 全部 image 候选
+    function pickCandidates(snapshot, selection) {
+      const all = imageCandidates(snapshot)
+      if (!selection) return { candidates: all, selectionNote: '' }
+      const hit = all.find(function (item) {
+        return item.provider === selection.provider && item.model === selection.model
+      })
+      if (hit) return { candidates: [hit], selectionNote: '' }
+      return {
+        candidates: [{
+          provider: selection.provider,
+          providerName: selection.provider,
+          model: selection.model,
+          name: selection.model,
+          description: '',
+        }],
+        selectionNote: '当前选择的模型未出现在支持图片的模型列表中（可能已下线或未声明模态）。',
+      }
+    }
+
+    // 阶段 5：单候选执行 —— 经 subagent 调 vision 模型，捕获模型层失败归因
     async function analyzeOnce(candidate, prompt, parent, exec) {
       const requestFailures = []
       const offError = ctx.on('agent/request-error', async function (payload, next) {
@@ -290,6 +398,70 @@ return {
         offError()
       }
     }
+
+    // 结果组装：成功 meta（工具卡数据源）
+    function buildMeta(candidate, described, attempts, started) {
+      return {
+        provider: candidate.provider,
+        providerName: candidate.providerName,
+        model: candidate.model,
+        modelName: candidate.name,
+        images: described.map(function (item) {
+          return {
+            path: String(item.path),
+            name: String(item.name),
+            mediaType: String(item.mediaType),
+            width: item.width || 0,
+            height: item.height || 0,
+            bytes: item.bytes || 0,
+          }
+        }),
+        attempts: attempts,
+        elapsedMs: Date.now() - started,
+      }
+    }
+
+    function successRun(candidate, described, meta) {
+      return {
+        at: Date.now(),
+        ok: true,
+        provider: candidate.provider,
+        providerName: candidate.providerName,
+        model: candidate.model,
+        modelName: candidate.name,
+        images: described.length,
+        elapsedMs: meta.elapsedMs,
+      }
+    }
+
+    function failureRun(attempts, described, started) {
+      const last = attempts.length ? attempts[attempts.length - 1] : null
+      const failures = attempts.map(function (item) {
+        return item.provider + '/' + item.model + ' → ' + (item.detail || '未知失败')
+      })
+      return {
+        at: Date.now(),
+        ok: false,
+        provider: last ? last.provider : '',
+        model: last ? last.model : '',
+        images: described.length,
+        elapsedMs: Date.now() - started,
+        detail: clip(failures.join(' | '), 240),
+      }
+    }
+
+    function failureMessage(attempts, selectionNote) {
+      const failures = attempts.map(function (item) {
+        return item.provider + '/' + item.model + ' → ' + (item.detail || '未知失败')
+      })
+      return (
+        'um_analyze_img: 所有候选 vision 模型均失败。' +
+        (selectionNote ? '\n注意：' + selectionNote : '') +
+        '\n' + failures.join('\n')
+      )
+    }
+
+    // ════════════════════════ L4 app（装配：工具 + RPC + 副作用回收）════════════════════════
 
     const tool = harness.defineTool({
       name: 'um_analyze_img',
@@ -342,107 +514,27 @@ return {
       presentResult: function (args, result) {
         return { card: 'generic', title: result && result.isError ? '图片分析失败' : '图片分析完成' }
       },
+      // execute = 线性编排：入参规范化 → 读取预检 → 原子入库 → 候选解析 → 失败切换
       async execute(args, exec) {
         const started = Date.now()
-        const paths = toStringList(args && args.image_paths)
-        if (paths.length === 0) {
-          throw new Error('um_analyze_img: image_paths 至少需要一个图片路径。')
-        }
         const limits = limitsSnapshot()
-        const maxCount = Math.min(MAX_IMAGES, limits.maxImagesPerMessage || MAX_IMAGES)
-        if (paths.length > maxCount) {
-          throw new Error('um_analyze_img: 一次最多 ' + maxCount + ' 张图片，收到 ' + paths.length + ' 张。')
-        }
-
-        // 1. 逐张读取字节 → 嗅探真实格式 → 限额预检
-        const inputs = []
-        const described = []
-        let totalBytes = 0
-        for (const path of paths) {
-          let target
-          try {
-            target = await ctx.fs.resolve(path, { signal: exec.signal })
-          } catch (err) {
-            throw new Error('um_analyze_img: 无法定位图片「' + path + '」：' + clip(err && err.message, 160))
-          }
-          const readCap = Math.max(1024, Math.min(limits.maxImageBytes, 32 * 1024 * 1024))
-          let bytes
-          try {
-            bytes = await ctx.fs.readBytes(target, exec.signal, readCap)
-          } catch (err) {
-            throw new Error('um_analyze_img: 读取图片「' + path + '」失败：' + clip(err && err.message, 160))
-          }
-          if (bytes.length >= readCap) {
-            throw new Error(
-              'um_analyze_img: 图片「' + path + '」超过单图上限 ' + limits.maxImageBytes + ' 字节。',
-            )
-          }
-          const mediaType = resolveMediaType(path, bytes)
-          if (!mediaType) {
-            throw new Error(
-              'um_analyze_img: 无法识别「' + path + '」的图片格式（仅支持 ' + limits.mediaTypes.join(' / ') + '）。',
-            )
-          }
-          totalBytes += bytes.length
-          inputs.push({ data: bytes, mediaType: mediaType, name: baseNameOf(path) })
-          described.push({ path: path, name: baseNameOf(path), mediaType: mediaType, bytes: bytes.length })
-        }
-        if (limits.maxMessageImageBytes && totalBytes > limits.maxMessageImageBytes) {
-          throw new Error(
-            'um_analyze_img: 图片总量 ' + totalBytes + ' 字节超过单条消息上限 ' + limits.maxMessageImageBytes + ' 字节。',
-          )
-        }
-
-        // 2. 入库为附件引用（校验 + 规范化，批量原子）
-        const refs = await ctx.attachments.saveImages(inputs)
-        for (let i = 0; i < described.length; i++) {
-          const ref = refs[i]
-          if (!ref) continue
-          described[i].width = ref.width
-          described[i].height = ref.height
-          described[i].bytes = ref.bytes
-          described[i].mediaType = ref.mediaType
-        }
-
-        const prompt = [{ type: 'text', text: buildPrompt(args && args.question, described) }]
-        for (const ref of refs) prompt.push({ type: 'image', attachment: ref })
-
+        const paths = normalizePaths(args, limits)
+        const collected = await collectImageInputs(paths, limits, exec)
+        const refs = await storeAndMerge(collected.inputs, collected.described)
+        const prompt = composePrompt(args && args.question, collected.described, refs)
         const parent = ctx.agents.currentInitiator() || ctx.agents.requireInitiator()
 
-        // 3. 候选模型：面板有选择 → 只试它；无选择 → 依次尝试全部支持图片的模型
         const snapshot = await enumerateModels(false)
-        const all = imageCandidates(snapshot)
-        let candidates
-        let selectionNote = ''
-        if (selection) {
-          const hit = all.find(function (item) {
-            return item.provider === selection.provider && item.model === selection.model
-          })
-          if (hit) {
-            candidates = [hit]
-          } else {
-            candidates = [{
-              provider: selection.provider,
-              providerName: selection.provider,
-              model: selection.model,
-              name: selection.model,
-              description: '',
-            }]
-            selectionNote = '当前选择的模型未出现在支持图片的模型列表中（可能已下线或未声明模态）。'
-          }
-        } else {
-          candidates = all
-        }
-        if (candidates.length === 0) {
+        const picked = pickCandidates(snapshot, selection)
+        if (picked.candidates.length === 0) {
           throw new Error(
             'um_analyze_img: 当前没有任何已注册且支持图片输入的模型（inputModalities 含 image）。' +
             '请在「设置 → 图片分析」中确认 vision 模型配置。',
           )
         }
 
-        // 4. 依次尝试，失败自动切换下一个候选
         const attempts = []
-        for (const candidate of candidates) {
+        for (const candidate of picked.candidates) {
           const attempt = await analyzeOnce(candidate, prompt, parent, exec)
           attempts.push({
             provider: candidate.provider,
@@ -452,56 +544,15 @@ return {
             detail: attempt.ok ? null : clip(attempt.detail, 240),
           })
           if (attempt.ok) {
-            const meta = {
-              provider: candidate.provider,
-              providerName: candidate.providerName,
-              model: candidate.model,
-              modelName: candidate.name,
-              images: described.map(function (item) {
-                return {
-                  path: String(item.path),
-                  name: String(item.name),
-                  mediaType: String(item.mediaType),
-                  width: item.width || 0,
-                  height: item.height || 0,
-                  bytes: item.bytes || 0,
-                }
-              }),
-              attempts: attempts,
-              elapsedMs: Date.now() - started,
-            }
-            lastRun = {
-              at: Date.now(),
-              ok: true,
-              provider: candidate.provider,
-              providerName: candidate.providerName,
-              model: candidate.model,
-              modelName: candidate.name,
-              images: described.length,
-              elapsedMs: meta.elapsedMs,
-            }
+            const meta = buildMeta(candidate, collected.described, attempts, started)
+            lastRun = successRun(candidate, collected.described, meta)
             console.log('[um_analyze_img] ok via ' + candidate.provider + '/' + candidate.model + ' in ' + meta.elapsedMs + 'ms')
             return { analysis: attempt.text, meta: meta }
           }
         }
 
-        const failures = attempts.map(function (item) {
-          return item.provider + '/' + item.model + ' → ' + (item.detail || '未知失败')
-        })
-        lastRun = {
-          at: Date.now(),
-          ok: false,
-          provider: attempts.length ? attempts[attempts.length - 1].provider : '',
-          model: attempts.length ? attempts[attempts.length - 1].model : '',
-          images: described.length,
-          elapsedMs: Date.now() - started,
-          detail: clip(failures.join(' | '), 240),
-        }
-        throw new Error(
-          'um_analyze_img: 所有候选 vision 模型均失败。' +
-          (selectionNote ? '\n注意：' + selectionNote : '') +
-          '\n' + failures.join('\n'),
-        )
+        lastRun = failureRun(attempts, collected.described, started)
+        throw new Error(failureMessage(attempts, picked.selectionNote))
       },
     })
 

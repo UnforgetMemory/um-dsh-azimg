@@ -2,6 +2,13 @@
 // 1) settings.section：vision 模型能力列表 + 热切换 + 可用性探测
 // 2) tool.call.toolview：um_analyze_img 调用卡片
 // 样式全部走 --dsw-alias-* 设计令牌，自动跟随明暗主题。
+//
+// 分层（单函数体约束下的区内分层，依赖方向自上而下）：
+//   L1 libraries     —— 设计令牌样式表 + 纯工具函数（无 ctx 依赖）
+//   L2 feature 组件  —— 单一职责展示组件（卡片 / 模型行 / 状态行）
+//   L3 app           —— SettingsPanel 状态编排 + Slot 装配与 Fiber 副作用回收
+
+// ════════════════════════ L1 libraries ════════════════════════
 
 const CSS = [
   '.umazimg-root{display:flex;flex-direction:column;gap:14px}',
@@ -88,6 +95,147 @@ function fmtTime(at) {
   return date.toLocaleString()
 }
 
+// ════════════════════════ L2 feature 组件（单一职责展示）════════════════════════
+
+// 当前模型卡：选定回显 + 探测 / 改回自动
+function CurrentModelCard(props) {
+  const selection = props.selection
+  return React.createElement('div', { className: 'umazimg-card' },
+    React.createElement('h4', { className: 'umazimg-cardtitle' }, '当前模型'),
+    React.createElement('div', { className: 'umazimg-row' },
+      React.createElement('span', { className: 'umazimg-dot' + (selection ? '' : ' is-auto') }),
+      React.createElement('span', { className: 'umazimg-grow' },
+        React.createElement('span', { className: 'umazimg-name' }, selection ? (selection.provider + ' / ' + selection.model) : '自动（按注册顺序依次尝试全部支持图片的模型）'),
+        selection
+          ? React.createElement('div', { className: 'umazimg-mono' }, '固定使用该模型；失败时不会自动切换')
+          : React.createElement('div', { className: 'umazimg-mono' }, '无固定模型；调用时逐个候选自动失败切换'),
+      ),
+      React.createElement('button', { type: 'button', className: 'umazimg-btn', disabled: props.busy || !selection, onClick: props.onProbe }, '探测可用性'),
+      React.createElement('button', { type: 'button', className: 'umazimg-btn', disabled: props.busy || !selection, onClick: props.onAuto }, '改为自动'),
+    ),
+    props.probe
+      ? React.createElement('div', { className: 'umazimg-pre' }, JSON.stringify(props.probe, null, 2))
+      : null,
+  )
+}
+
+// 单个模型行：能力标签 + 选择态 + 点击切换
+function ModelRowButton(props) {
+  const group = props.group
+  const row = props.row
+  const usable = row.support === 'image'
+  const tags = []
+  if (row.support === 'image') tags.push(React.createElement('span', { key: 't1', className: 'umazimg-tag is-ok' }, '支持图片'))
+  else if (row.support === 'unknown') tags.push(React.createElement('span', { key: 't1', className: 'umazimg-tag is-warn' }, '未声明模态'))
+  else tags.push(React.createElement('span', { key: 't1', className: 'umazimg-tag' }, '纯文本'))
+  if (row.resolved) tags.push(React.createElement('span', { key: 't2', className: 'umazimg-tag' }, '已解析'))
+  if (row.contextWindow) tags.push(React.createElement('span', { key: 't3', className: 'umazimg-tag' }, String(row.contextWindow) + ' ctx'))
+  if (row.probeError) tags.push(React.createElement('span', { key: 't4', className: 'umazimg-tag is-err' }, '解析失败'))
+  return React.createElement('button', {
+    type: 'button',
+    disabled: !usable,
+    className: 'umazimg-model' + (props.selected ? ' is-selected' : '') + (usable ? '' : ' is-disabled'),
+    onClick: usable ? function () { props.onChoose(group.provider, row.model) } : undefined,
+  },
+    React.createElement('span', { className: 'umazimg-dot' + (props.selected ? '' : ' is-auto'), style: { opacity: props.selected ? 1 : 0.35 } }),
+    React.createElement('span', { className: 'umazimg-grow' },
+      React.createElement('span', { className: 'umazimg-name' }, row.name || row.model),
+      React.createElement('div', { className: 'umazimg-mono' }, row.model + (row.description ? ' · ' + row.description : '')),
+    ),
+    tags,
+  )
+}
+
+// provider 分组：组头统计 + 按能力排序的模型行
+function ModelGroupSection(props) {
+  const group = props.group
+  if (group.error) {
+    return React.createElement('div', { className: 'umazimg-group' },
+      React.createElement('div', { className: 'umazimg-groupname' }, group.providerName + '（枚举失败）'),
+      React.createElement('div', { className: 'umazimg-status is-err' }, String(group.error)),
+    )
+  }
+  const rows = group.models.slice().sort(function (a, b) {
+    const rank = { image: 0, unknown: 1, text: 2 }
+    return (rank[a.support] || 3) - (rank[b.support] || 3)
+  })
+  const imageCount = rows.filter(function (row) { return row.support === 'image' }).length
+  return React.createElement('div', { className: 'umazimg-group' },
+    React.createElement('div', { className: 'umazimg-groupname' }, group.providerName + ' · ' + imageCount + '/' + rows.length + ' 支持图片'),
+    React.createElement('div', { className: 'umazimg-list' },
+      rows.map(function (row) {
+        const key = group.provider + '\u0000' + row.model
+        return React.createElement(ModelRowButton, {
+          key: key,
+          group: group,
+          row: row,
+          selected: key === props.selectionKey,
+          onChoose: props.onChoose,
+        })
+      }),
+    ),
+  )
+}
+
+// 模型能力卡：统计行 + 刷新 + 分组列表
+function CapabilityCard(props) {
+  const stats = props.stats
+  const groups = props.groups
+  return React.createElement('div', { className: 'umazimg-card' },
+    React.createElement('div', { className: 'umazimg-row' },
+      React.createElement('h4', { className: 'umazimg-cardtitle umazimg-grow' }, '模型能力'),
+      React.createElement('button', { type: 'button', className: 'umazimg-btn is-primary', disabled: props.busy, onClick: props.onRefresh }, props.busy ? '处理中…' : '刷新'),
+    ),
+    React.createElement('div', { className: 'umazimg-status' },
+      '已注册 ' + stats.providers + ' 个 provider · ' + stats.models + ' 个模型 · ' +
+      stats.image + ' 个支持图片 · ' + stats.unknown + ' 个未声明模态 · ' + stats.textOnly + ' 个纯文本'),
+    groups.length === 0
+      ? React.createElement('div', { className: 'umazimg-status' }, '当前没有已注册的 provider。请先在「模型」设置中配置 provider 与 vision 模型。')
+      : React.createElement('div', { className: 'umazimg-list' },
+          groups.map(function (group) {
+            if (!group.error && (!group.models || group.models.length === 0)) return null
+            return React.createElement(ModelGroupSection, {
+              key: (group.error ? 'err-' : 'g-') + group.provider,
+              group: group,
+              selectionKey: props.selectionKey,
+              onChoose: props.onChoose,
+            })
+          }),
+        ),
+    stats.image === 0 && groups.length > 0
+      ? React.createElement('div', { className: 'umazimg-status is-warn' }, '没有任何模型声明支持图片输入；工具调用会直接报错。')
+      : null,
+  )
+}
+
+// 最近一次调用卡：结果回显 + 附件限额
+function LastRunCard(props) {
+  const lastRun = props.lastRun
+  const limits = props.limits
+  return React.createElement('div', { className: 'umazimg-card' },
+    React.createElement('h4', { className: 'umazimg-cardtitle' }, '最近一次调用'),
+    lastRun
+      ? React.createElement('div', { className: 'umazimg-row' },
+          React.createElement('span', { className: 'umazimg-dot' + (lastRun.ok ? '' : ' is-missing') }),
+          React.createElement('span', { className: 'umazimg-grow' },
+            React.createElement('span', { className: 'umazimg-name' },
+              (lastRun.ok ? '成功' : '失败') + ' · ' + (lastRun.provider || '?') + ' / ' + (lastRun.model || '?')),
+            React.createElement('div', { className: 'umazimg-mono' },
+              (lastRun.images || 0) + ' 张图 · ' + (lastRun.elapsedMs || 0) + ' ms · ' + fmtTime(lastRun.at) +
+              (lastRun.detail ? ' · ' + lastRun.detail : '')),
+          ),
+        )
+      : React.createElement('div', { className: 'umazimg-status' }, '本次会话尚未调用过该工具。'),
+    limits
+      ? React.createElement('div', { className: 'umazimg-mono' },
+          '单图 ≤ ' + limits.maxImageBytes + ' B · 单条消息 ≤ ' + limits.maxMessageImageBytes + ' B · 最多 ' +
+          Math.min(8, limits.maxImagesPerMessage || 8) + ' 张 · 支持 ' + (limits.mediaTypes || []).join(' / '))
+      : null,
+  )
+}
+
+// ════════════════════════ L3 app（状态编排 + 装配）════════════════════════
+
 return {
   apply(ctx) {
     const slots = ctx.get('slots')
@@ -95,7 +243,7 @@ return {
 
     ctx.effect(function () { return styles.insert(CSS) })
 
-    // ── 设置页 ─────────────────────────────────────────────────────────────
+    // ── 设置页：状态编排（store 本地态）+ 卡片组合 ──
     function SettingsPanel() {
       const [snapshot, setSnapshot] = React.useState(null)
       const [status, setStatus] = React.useState({ kind: '', text: '正在读取模型能力…' })
@@ -169,56 +317,6 @@ return {
       const stats = (snapshot && snapshot.stats) || { providers: 0, models: 0, image: 0, textOnly: 0, unknown: 0, resolved: 0 }
       const selection = (snapshot && snapshot.selection) || null
       const selectionKey = selection ? selection.provider + '\u0000' + selection.model : ''
-      const lastRun = (snapshot && snapshot.lastRun) || null
-      const limits = (snapshot && snapshot.limits) || null
-
-      const modelRows = []
-      groups.forEach(function (group) {
-        if (group.error) {
-          modelRows.push(React.createElement('div', { key: 'err-' + group.provider, className: 'umazimg-group' },
-            React.createElement('div', { className: 'umazimg-groupname' }, group.providerName + '（枚举失败）'),
-            React.createElement('div', { className: 'umazimg-status is-err' }, String(group.error)),
-          ))
-          return
-        }
-        if (!group.models || group.models.length === 0) return
-        const rows = group.models.slice().sort(function (a, b) {
-          const rank = { image: 0, unknown: 1, text: 2 }
-          return (rank[a.support] || 3) - (rank[b.support] || 3)
-        })
-        const imageCount = rows.filter(function (row) { return row.support === 'image' }).length
-        modelRows.push(React.createElement('div', { key: 'g-' + group.provider, className: 'umazimg-group' },
-          React.createElement('div', { className: 'umazimg-groupname' }, group.providerName + ' · ' + imageCount + '/' + rows.length + ' 支持图片'),
-          React.createElement('div', { className: 'umazimg-list' },
-            rows.map(function (row) {
-              const key = group.provider + '\u0000' + row.model
-              const selected = key === selectionKey
-              const usable = row.support === 'image'
-              const tags = []
-              if (row.support === 'image') tags.push(React.createElement('span', { key: 't1', className: 'umazimg-tag is-ok' }, '支持图片'))
-              else if (row.support === 'unknown') tags.push(React.createElement('span', { key: 't1', className: 'umazimg-tag is-warn' }, '未声明模态'))
-              else tags.push(React.createElement('span', { key: 't1', className: 'umazimg-tag' }, '纯文本'))
-              if (row.resolved) tags.push(React.createElement('span', { key: 't2', className: 'umazimg-tag' }, '已解析'))
-              if (row.contextWindow) tags.push(React.createElement('span', { key: 't3', className: 'umazimg-tag' }, String(row.contextWindow) + ' ctx'))
-              if (row.probeError) tags.push(React.createElement('span', { key: 't4', className: 'umazimg-tag is-err' }, '解析失败'))
-              return React.createElement('button', {
-                key: key,
-                type: 'button',
-                disabled: !usable,
-                className: 'umazimg-model' + (selected ? ' is-selected' : '') + (usable ? '' : ' is-disabled'),
-                onClick: usable ? function () { choose(group.provider, row.model) } : undefined,
-              },
-                React.createElement('span', { className: 'umazimg-dot' + (selected ? '' : ' is-auto'), style: { opacity: selected ? 1 : 0.35 } }),
-                React.createElement('span', { className: 'umazimg-grow' },
-                  React.createElement('span', { className: 'umazimg-name' }, row.name || row.model),
-                  React.createElement('div', { className: 'umazimg-mono' }, row.model + (row.description ? ' · ' + row.description : '')),
-                ),
-                tags,
-              )
-            }),
-          ),
-        ))
-      })
 
       return React.createElement('div', { className: 'umazimg-root' },
         React.createElement('h3', { className: 'umazimg-h1' }, '图片分析（um_analyze_img）'),
@@ -226,69 +324,32 @@ return {
           '为图片分析工具选择视觉（vision）模型。列表自动读取当前已注册 provider 的能力：' +
           '声明 inputModalities 含 image 的模型直接列出；未声明模态的模型会向适配器解析一次后再归类。' +
           '选择即时生效（热切换），无需重启。'),
-
-        React.createElement('div', { className: 'umazimg-card' },
-          React.createElement('h4', { className: 'umazimg-cardtitle' }, '当前模型'),
-          React.createElement('div', { className: 'umazimg-row' },
-            React.createElement('span', { className: 'umazimg-dot' + (selection ? '' : ' is-auto') }),
-            React.createElement('span', { className: 'umazimg-grow' },
-              React.createElement('span', { className: 'umazimg-name' }, selection ? (selection.provider + ' / ' + selection.model) : '自动（按注册顺序依次尝试全部支持图片的模型）'),
-              selection
-                ? React.createElement('div', { className: 'umazimg-mono' }, '固定使用该模型；失败时不会自动切换')
-                : React.createElement('div', { className: 'umazimg-mono' }, '无固定模型；调用时逐个候选自动失败切换'),
-            ),
-            React.createElement('button', { type: 'button', className: 'umazimg-btn', disabled: busy || !selection, onClick: runProbe }, '探测可用性'),
-            React.createElement('button', { type: 'button', className: 'umazimg-btn', disabled: busy || !selection, onClick: function () { choose(null, null) } }, '改为自动'),
-          ),
-          probe
-            ? React.createElement('div', { className: 'umazimg-pre' }, JSON.stringify(probe, null, 2))
-            : null,
-        ),
-
-        React.createElement('div', { className: 'umazimg-card' },
-          React.createElement('div', { className: 'umazimg-row' },
-            React.createElement('h4', { className: 'umazimg-cardtitle umazimg-grow' }, '模型能力'),
-            React.createElement('button', { type: 'button', className: 'umazimg-btn is-primary', disabled: busy, onClick: function () { load(true) } }, busy ? '处理中…' : '刷新'),
-          ),
-          React.createElement('div', { className: 'umazimg-status' },
-            '已注册 ' + stats.providers + ' 个 provider · ' + stats.models + ' 个模型 · ' +
-            stats.image + ' 个支持图片 · ' + stats.unknown + ' 个未声明模态 · ' + stats.textOnly + ' 个纯文本'),
-          groups.length === 0
-            ? React.createElement('div', { className: 'umazimg-status' }, '当前没有已注册的 provider。请先在「模型」设置中配置 provider 与 vision 模型。')
-            : React.createElement('div', { className: 'umazimg-list' }, modelRows),
-          stats.image === 0 && groups.length > 0
-            ? React.createElement('div', { className: 'umazimg-status is-warn' }, '没有任何模型声明支持图片输入；工具调用会直接报错。')
-            : null,
-        ),
-
-        React.createElement('div', { className: 'umazimg-card' },
-          React.createElement('h4', { className: 'umazimg-cardtitle' }, '最近一次调用'),
-          lastRun
-            ? React.createElement('div', { className: 'umazimg-row' },
-                React.createElement('span', { className: 'umazimg-dot' + (lastRun.ok ? '' : ' is-missing') }),
-                React.createElement('span', { className: 'umazimg-grow' },
-                  React.createElement('span', { className: 'umazimg-name' },
-                    (lastRun.ok ? '成功' : '失败') + ' · ' + (lastRun.provider || '?') + ' / ' + (lastRun.model || '?')),
-                  React.createElement('div', { className: 'umazimg-mono' },
-                    (lastRun.images || 0) + ' 张图 · ' + (lastRun.elapsedMs || 0) + ' ms · ' + fmtTime(lastRun.at) +
-                    (lastRun.detail ? ' · ' + lastRun.detail : '')),
-                ),
-              )
-            : React.createElement('div', { className: 'umazimg-status' }, '本次会话尚未调用过该工具。'),
-          limits
-            ? React.createElement('div', { className: 'umazimg-mono' },
-                '单图 ≤ ' + limits.maxImageBytes + ' B · 单条消息 ≤ ' + limits.maxMessageImageBytes + ' B · 最多 ' +
-                Math.min(8, limits.maxImagesPerMessage || 8) + ' 张 · 支持 ' + (limits.mediaTypes || []).join(' / '))
-            : null,
-        ),
-
+        React.createElement(CurrentModelCard, {
+          selection: selection,
+          busy: busy,
+          probe: probe,
+          onProbe: runProbe,
+          onAuto: function () { choose(null, null) },
+        }),
+        React.createElement(CapabilityCard, {
+          groups: groups,
+          stats: stats,
+          busy: busy,
+          selectionKey: selectionKey,
+          onChoose: choose,
+          onRefresh: function () { load(true) },
+        }),
+        React.createElement(LastRunCard, {
+          lastRun: (snapshot && snapshot.lastRun) || null,
+          limits: (snapshot && snapshot.limits) || null,
+        }),
         React.createElement('div', { className: 'umazimg-row' },
           React.createElement('span', { className: 'umazimg-status' + (status.kind ? ' is-' + status.kind : '') }, status.text),
         ),
       )
     }
 
-    // ── 工具调用卡片 ────────────────────────────────────────────────────────
+    // ── 工具调用卡片 ──
     function ToolCard(props) {
       const block = props && props.block
       const settled = !!(block && block.kind === 'tool-result')
@@ -366,6 +427,7 @@ return {
       )
     }
 
+    // ── Slot 装配（Fiber 副作用随 update/stop 自动回收）──
     ctx.effect(function () {
       return slots.inject('settings.section', function () {
         return slots.register(
