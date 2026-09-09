@@ -1,0 +1,8 @@
+# um-dsh-azimg bundle layer.
+#
+# 单行双面：既是 Host 行（工具 um_analyze_img + 设置数据服务 umimg/*），
+# 也是 browser roster 行 —— dsh-client-modules 扫描本行 name 包的 package.json
+# 的 `dsh.client` 声明与 exports["./client"]，把 lib/client.js 服务给浏览器。
+- insert:
+    - id: umimg
+      name: um-dsh-azimg
