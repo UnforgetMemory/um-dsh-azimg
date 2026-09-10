@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-10
+
+### Fixed
+
+- 修复设置页「读取失败：transport failure for /api/umimg/state: HTTP 404」：`@deepseek-ai/*` 平台包由 `dependencies` 改声明为 `peerDependencies`，消除 pnpm 私有副本造成的 `dsh-typert-protocol` 双模块实例（Remote 方法标记存于模块级 WeakMap，双实例导致 typert 网关不认领 `umimg/*` 端点）
+
 ## [0.2.0] - 2026-09-08
 
 ### Added
