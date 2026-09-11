@@ -1,6 +1,6 @@
 {
   "name": "um-dsh-azimg",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Give DeepSeek Harness agents eyes: local image analysis via vision models — um_analyze_img tool + model-capability recognition + hot-switch settings UI",
   "type": "module",
   "main": "lib/index.js",

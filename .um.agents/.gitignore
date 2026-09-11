@@ -1,0 +1,4 @@
+memory/
+tmp/
+local/
+*.local.md
