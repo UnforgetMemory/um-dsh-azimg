@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-11
+
+### Added
+
+- i18n 适配：Client 侧 UI 全量国际化，支持简体中文与英文双语，跟随 DSH locale 服务规范（`ctx.get('locale')` + `locale.bind(NS)` + `locale.register(NS, { zh, en })` + slot 入口 `locale: NS` 声明自动重渲染），覆盖设置页与工具调用卡片全部用户可见文本
+
 ## [0.2.1] - 2026-09-10
 
 ### Fixed

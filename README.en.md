@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/platform-DeepSeek%20Harness-6c63ff" alt="platform" />
   <a href="https://ko-fi.com/unforgetmemory"><img src="https://img.shields.io/badge/Ko--fi-F16061?logo=ko-fi&logoColor=white" alt="Ko-fi" /></a>
 </p>
@@ -29,6 +29,7 @@
 - **Smart model routing** — three-way image-capability detection per provider model (image / text / unknown) with adapter re-verification; automatic failover with aggregated attribution (credentials / stopReason / diagnostic)
 - **Hot switching** — selection in the settings page takes effect immediately, no restart; availability probing + last-call echo
 - **Native UI** — settings page and tool card built entirely on DSH design tokens (`--dsw-alias-*`), adapting to light/dark themes automatically
+- **i18n** — full bilingual support (简体中文 / English) on settings page and tool card, following DSH locale service conventions with automatic re-render on language switch
 
 ## 🚀 Quick Start
 
@@ -105,13 +106,13 @@ Host service dependencies: `tools` · `subagents` · `llm` · `agents` · `attac
 | `lib/client.js` | Static client half: hand-written factory-form browser bundle (zero build) |
 | `package.json` / `cordis.patch.yml` | `dsh.bundle` + `dsh.client` declarations and the single dual-face layer row |
 | `README.md` | 简体中文 README（默认） |
-| `hero.png` / `hero.jpg` | Hero artwork (original) / web-optimized version (referenced by the READMEs) |
+| `hero.jpg` | Hero artwork referenced by the READMEs (original kept locally in `.um.agents/local/`, untracked) |
 
 > Code organization: each function body is internally sectioned into **libraries → provider → scenario → app** layers (in-body layering under the single-function-body constraint; dependencies point downward only), with `execute` as the linear orchestration entry point.
 
 ## 📋 Version
 
-Current **0.2.0** — see [CHANGELOG.md](./CHANGELOG.md) for history.
+Current **0.3.0** — see [CHANGELOG.md](./CHANGELOG.md) for history.
 
 ## ☕ Support
 

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/platform-DeepSeek%20Harness-6c63ff" alt="platform" />
   <a href="https://ko-fi.com/unforgetmemory"><img src="https://img.shields.io/badge/Ko--fi-F16061?logo=ko-fi&logoColor=white" alt="Ko-fi" /></a>
 </p>
@@ -29,6 +29,7 @@
 - **智能模型调度** —— provider 模型图片能力三分识别（image / text / unknown）+ 适配器复核；失败自动切换并聚合归因（凭据 / stopReason / diagnostic）
 - **热切换** —— 设置页选择即时生效，无需重启；可用性探测 + 最近一次调用回显
 - **原生 UI** —— 设置页与工具卡完全遵循 DSH 设计令牌（`--dsw-alias-*`），自动适配明暗主题
+- **国际化** —— 设置页与工具卡全量支持简体中文 / 英文双语，跟随 DSH locale 服务规范，随语言切换自动重渲染
 
 ## 🚀 快速开始
 
@@ -105,13 +106,13 @@ Host 依赖服务：`tools` · `subagents` · `llm` · `agents` · `attachments`
 | `lib/client.js` | 静态 Client 半：手写 factory-form 浏览器 bundle（零构建） |
 | `package.json` / `cordis.patch.yml` | `dsh.bundle` + `dsh.client` 声明与单行双面层 |
 | `README.en.md` | English README |
-| `hero.png` / `hero.jpg` | 头图原始稿 / Web 优化版（README 引用后者） |
+| `hero.jpg` | 头图（README 引用；原稿本地留存于 `.um.agents/local/`，不入库） |
 
 > 代码组织：两个函数体内部按 **libraries → provider → scenario → app** 分区（单函数体约束下的区内分层，依赖单向向下），`execute` 为线性编排入口。
 
 ## 📋 版本
 
-当前 **0.2.0** —— 变更历史见 [CHANGELOG.md](./CHANGELOG.md)。
+当前 **0.3.0** —— 变更历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ## ☕ 支持本项目
 
