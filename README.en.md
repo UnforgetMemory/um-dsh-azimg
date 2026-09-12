@@ -76,13 +76,13 @@ Candidates ── panel selection set → try only that model (no silent switchi
               not set             → try every image-capable model in turn (automatic failover)
    │
    ▼
-subagents.start('agent', { provider, model }) → vision subagent analyzes
+llm.stream({ provider, model, messages }) → direct in-process vision call (attachment pixels resolved by the adapter in place)
    │
    ▼
 { analysis, meta } — the model reads analysis; the tool card reads meta (model / images / attempts / elapsed)
 ```
 
-Host service dependencies: `tools` · `subagents` · `llm` · `agents` · `attachments` · `fs`
+Host service dependencies: `tools` · `llm` · `attachments` · `fs`
 
 ## 🖥️ Settings Page & Tool Card
 

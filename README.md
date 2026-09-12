@@ -76,13 +76,13 @@ Host 插件 ── 限额预检 → 魔数嗅探真实格式 → 批量原子入
            未选择     → 依次尝试全部 image 能力模型（失败自动切换）
    │
    ▼
-subagents.start('agent', { provider, model }) → vision 子代理分析
+llm.stream({ provider, model, messages }) → 进程内直调 vision 模型（附件像素由适配器就地解析）
    │
    ▼
 { analysis, meta } —— 模型读 analysis，工具卡读 meta（模型 / 张数 / 尝试次数 / 耗时）
 ```
 
-Host 依赖服务：`tools` · `subagents` · `llm` · `agents` · `attachments` · `fs`
+Host 依赖服务：`tools` · `llm` · `attachments` · `fs`
 
 ## 🖥️ 设置页与工具卡
 
