@@ -64,13 +64,6 @@ function resolveMediaType(path, bytes) {
   return EXT_MEDIA[extOf(path)]
 }
 
-function textOfBlocks(blocks) {
-  return (blocks || [])
-    .map(function (block) { return block && block.type === 'text' ? String(block.text || '') : '' })
-    .join('\n')
-    .trim()
-}
-
 function toStringList(value) {
   if (Array.isArray(value)) {
     return value.filter(function (item) { return typeof item === 'string' && item.trim() !== '' })
@@ -93,6 +86,37 @@ async function mapLimit(items, limit, worker) {
     })())
   }
   await Promise.all(runners)
+}
+
+// 深冻结（跳过 AbortSignal——它是请求的活取消通道；语义与 dsh-llm 的 deepFreeze 一致）
+function deepFreeze(value) {
+  const seen = new WeakSet()
+  const pending = [{ kind: 'visit', node: value }]
+  while (pending.length > 0) {
+    const task = pending.pop()
+    if (task === undefined) continue
+    if (task.kind === 'property') {
+      pending.push({ kind: 'visit', node: task.source[task.key] })
+      continue
+    }
+    const node = task.node
+    if (node === null || typeof node !== 'object') continue
+    if (typeof AbortSignal !== 'undefined' && node instanceof AbortSignal) continue
+    if (seen.has(node)) continue
+    seen.add(node)
+    Object.freeze(node)
+    const keys = Object.keys(node)
+    for (let i = keys.length - 1; i >= 0; i--) {
+      pending.push({ kind: 'property', source: node, key: keys[i] })
+    }
+  }
+  return value
+}
+
+// 无 import 环境下的消息 ID（语义与 createUserMessage 的 crypto.randomUUID 一致，带降级）
+function randomMessageId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
 }
 
 function buildPrompt(question, described) {
@@ -156,7 +180,7 @@ function imageCandidates(snapshot) {
 }
 
 return {
-  inject: ['tools', 'subagents', 'llm', 'agents', 'attachments', 'fs'],
+  inject: ['tools', 'llm', 'attachments', 'fs'],
   apply(ctx) {
     // ══ store：会话内存态（动态插件按规范不持久化，进程重启即重置）══
     let selection = null   // 热切换：当前选定的 vision provider/model（null = 自动依次尝试）
@@ -352,51 +376,84 @@ return {
       }
     }
 
-    // 阶段 5：单候选执行 —— 经 subagent 调 vision 模型，捕获模型层失败归因
-    async function analyzeOnce(candidate, prompt, parent, exec) {
-      const requestFailures = []
-      const offError = ctx.on('agent/request-error', async function (payload, next) {
-        if (payload && payload.failure) {
-          requestFailures.push(
-            '[' + (payload.provider || '?') + '] ' + (payload.failure.code || 'E') + ': ' +
-            clip(payload.failure.message, 240),
-          )
-        }
-        return next()
+    // 阶段 5：单候选执行 —— 进程内直调 ctx.llm.stream，附件像素由适配器就地解析
+    //（不经过子代理：子代理边界只会拿到附件占位符，vision 模型看不到像素内容）
+    async function analyzeOnce(candidate, prompt, exec) {
+      const messages = [{
+        id: randomMessageId(),
+        role: 'user',
+        content: prompt,
+        source: { kind: 'plugin', plugin: 'um-dsh-azimg' },
+      }]
+      const options = deepFreeze({
+        provider: candidate.provider,
+        model: candidate.model,
+        messages: messages,
+        signal: exec.signal,
       })
-      const providers = ctx.subagents.list()
-      const providerName = providers.indexOf('agent') >= 0 ? 'agent' : providers[0]
-      if (!providerName) return { ok: false, detail: '没有可用的 subagent provider。' }
-      try {
-        console.log('[um_analyze_img] try ' + candidate.provider + '/' + candidate.model + ' via subagent=' + providerName)
-        const run = await ctx.subagents.start(providerName, {
-          label: 'um_analyze_img',
-          prompt: prompt,
-          parent: parent,
-          signal: exec.signal,
-          agentOptions: { provider: candidate.provider, model: candidate.model },
-        })
-        try {
-          const result = await run.result
-          const bits = []
-          if (requestFailures.length > 0) bits.push('模型请求失败: ' + requestFailures.join(' | '))
-          if (result.diagnostic) bits.push('diagnostic: ' + clip(result.diagnostic, 240))
-          if (result.stopReason !== 'completed') {
-            bits.push('stopReason: ' + result.stopReason)
-            return { ok: false, detail: bits.join('; ') }
-          }
-          const text = textOfBlocks(result.output || [])
-          if (!text) {
-            bits.push('子代理未产出文本分析')
-            return { ok: false, detail: bits.join('; ') }
-          }
-          return { ok: true, text: text, warnings: bits }
-        } finally {
-          await run.dispose()
+
+      // 手工装配器：语义与 dsh-llm 的 BlockAssembler 一致（text/reasoning 增量 → block-end 定稿 → finish 终止）
+      const parts = new Map() // index → { type, text, block }
+      const order = []
+      let finish = null
+      const ensure = function (index, type) {
+        let part = parts.get(index)
+        if (!part) {
+          part = { type: type, text: '', block: null }
+          parts.set(index, part)
+          order.push(index)
         }
-      } finally {
-        offError()
+        return part
       }
+
+      try {
+        console.log('[um_analyze_img] try ' + candidate.provider + '/' + candidate.model + ' via direct llm.stream')
+        for await (const chunk of ctx.llm.stream(options)) {
+          if (chunk.type === 'block-start') {
+            ensure(chunk.index, chunk.blockType)
+          } else if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+            const part = ensure(chunk.index, chunk.type === 'text-delta' ? 'text' : 'reasoning')
+            if (!part.block) part.text += chunk.text
+          } else if (chunk.type === 'block-end') {
+            const part = ensure(chunk.index, chunk.block ? chunk.block.type : 'text')
+            if (!part.block) part.block = chunk.block
+          } else if (chunk.type === 'finish') {
+            finish = chunk.reason
+          }
+          // usage / tool-call-delta 与本场景无关：忽略
+        }
+      } catch (err) {
+        if (exec.signal && exec.signal.aborted) throw new Error('um_analyze_img: 调用已取消。')
+        return { ok: false, detail: clip(err && err.message ? err.message : err, 240) }
+      }
+
+      if (exec.signal && exec.signal.aborted) throw new Error('um_analyze_img: 调用已取消。')
+      if (!finish) finish = { kind: 'stop' }
+      if (finish.kind === 'error' || finish.kind === 'aborted') {
+        const failure = finish.failure || {}
+        return {
+          ok: false,
+          detail: '模型调用失败[' + (failure.code || 'E') + ']: ' + clip(failure.message || '未知错误', 240),
+        }
+      }
+      if (finish.kind === 'max-tokens') return { ok: false, detail: '模型输出达到 maxTokens 上限。' }
+      if (finish.kind === 'tool-calls') return { ok: false, detail: '模型意外请求了工具调用（该场景不支持工具）。' }
+      if (finish.kind !== 'stop') return { ok: false, detail: '未知完成原因: ' + String(finish.kind) }
+
+      const text = order
+        .map(function (index) {
+          const part = parts.get(index)
+          if (part && part.block) return part.block
+          if (part && part.type === 'text') return { type: 'text', text: part.text }
+          return null
+        })
+        .filter(Boolean)
+        .filter(function (block) { return block.type === 'text' })
+        .map(function (block) { return String(block.text || '') })
+        .join('\n')
+        .trim()
+      if (!text) return { ok: false, detail: '模型未产出文本分析。' }
+      return { ok: true, text: text }
     }
 
     // 结果组装：成功 meta（工具卡数据源）
@@ -522,7 +579,6 @@ return {
         const collected = await collectImageInputs(paths, limits, exec)
         const refs = await storeAndMerge(collected.inputs, collected.described)
         const prompt = composePrompt(args && args.question, collected.described, refs)
-        const parent = ctx.agents.currentInitiator() || ctx.agents.requireInitiator()
 
         const snapshot = await enumerateModels(false)
         const picked = pickCandidates(snapshot, selection)
@@ -535,7 +591,7 @@ return {
 
         const attempts = []
         for (const candidate of picked.candidates) {
-          const attempt = await analyzeOnce(candidate, prompt, parent, exec)
+          const attempt = await analyzeOnce(candidate, prompt, exec)
           attempts.push({
             provider: candidate.provider,
             model: candidate.model,

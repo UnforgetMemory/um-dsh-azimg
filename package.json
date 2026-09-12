@@ -4,6 +4,9 @@
   "description": "Give DeepSeek Harness agents eyes: local image analysis via vision models — um_analyze_img tool + model-capability recognition + hot-switch settings UI",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "test": "node test/analyze-once.test.mjs"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -23,6 +26,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-invariants": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.1-rc.2"
   },
   "dsh": {
